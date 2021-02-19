@@ -16,8 +16,8 @@ extern void TRTNMSCUDAKernelLauncher_float(
     const int max_output_boxes_per_class, const float iou_threshold,
     const float score_threshold, const int offset, int *output,
     int center_point_box, int num_batches, int spatial_dimension,
-    int num_classes, size_t output_length, void *workspace,
-    cudaStream_t stream);
+    int num_classes, size_t output_length, bool output_index_only,
+    void *workspace, cudaStream_t stream);
 
 namespace {
 static const char *PLUGIN_VERSION{"1"};
@@ -62,19 +62,33 @@ nvinfer1::DimsExprs NonMaxSuppressionDynamic::getOutputDimensions(
     int outputIndex, const nvinfer1::DimsExprs *inputs, int nbInputs,
     nvinfer1::IExprBuilder &exprBuilder) {
   nvinfer1::DimsExprs ret;
-  ret.nbDims = 2;
-  auto num_batches = inputs[0].d[0];
-  auto spatial_dimension = inputs[0].d[1];
-  if (mMaxOutputBoxesPerClass > 0) {
-    spatial_dimension = exprBuilder.constant(mMaxOutputBoxesPerClass);
+  if (inputs[0].nbDims == 3) {
+    // batch mode
+    ret.nbDims = 2;
+    auto num_batches = inputs[0].d[0];
+    auto spatial_dimension = inputs[0].d[1];
+    if (mMaxOutputBoxesPerClass > 0) {
+      spatial_dimension = exprBuilder.operation(
+          nvinfer1::DimensionOperation::kMIN, *spatial_dimension,
+          *exprBuilder.constant(mMaxOutputBoxesPerClass));
+    }
+    auto num_classes = inputs[1].d[1];
+    ret.d[0] = exprBuilder.operation(
+        nvinfer1::DimensionOperation::kPROD, *num_batches,
+        *exprBuilder.operation(nvinfer1::DimensionOperation::kPROD,
+                               *spatial_dimension, *num_classes));
+    ret.d[1] = exprBuilder.constant(3);
+  } else {
+    // non batch mode
+    ret.nbDims = 1;
+    auto spatial_dimension = inputs[0].d[0];
+    if (mMaxOutputBoxesPerClass > 0) {
+      spatial_dimension = exprBuilder.operation(
+          nvinfer1::DimensionOperation::kMIN, *spatial_dimension,
+          *exprBuilder.constant(mMaxOutputBoxesPerClass));
+    }
+    ret.d[0] = spatial_dimension;
   }
-  auto num_classes = inputs[1].d[1];
-  ret.d[0] = exprBuilder.operation(
-      nvinfer1::DimensionOperation::kPROD, *num_batches,
-      *exprBuilder.operation(nvinfer1::DimensionOperation::kPROD,
-                             *spatial_dimension, *num_classes));
-  ret.d[1] = exprBuilder.constant(3);
-
   return ret;
 }
 
@@ -115,9 +129,16 @@ size_t NonMaxSuppressionDynamic::getWorkspaceSize(
     const nvinfer1::PluginTensorDesc *inputs, int nbInputs,
     const nvinfer1::PluginTensorDesc *outputs, int nbOutputs) const {
   size_t boxes_word_size = mmcv::getElementSize(inputs[0].type);
-  size_t num_batches = inputs[0].dims.d[0];
-  size_t spatial_dimension = inputs[0].dims.d[1];
-  size_t num_classes = inputs[1].dims.d[1];
+  size_t num_batches = 1;
+  size_t num_classes = 1;
+  size_t spatial_dimension = 1;
+  if (inputs[0].dims.nbDims == 3) {
+    num_batches = inputs[0].dims.d[0];
+    spatial_dimension = inputs[0].dims.d[1];
+    num_classes = inputs[1].dims.d[1];
+  } else {
+    spatial_dimension = inputs[0].dims.d[0];
+  }
   size_t output_length = outputs[0].dims.d[0];
 
   return get_onnxnms_workspace_size(num_batches, spatial_dimension, num_classes,
@@ -129,9 +150,17 @@ int NonMaxSuppressionDynamic::enqueue(
     const nvinfer1::PluginTensorDesc *inputDesc,
     const nvinfer1::PluginTensorDesc *outputDesc, const void *const *inputs,
     void *const *outputs, void *workSpace, cudaStream_t stream) {
-  int num_batches = inputDesc[0].dims.d[0];
-  int spatial_dimension = inputDesc[0].dims.d[1];
-  int num_classes = inputDesc[1].dims.d[1];
+  int num_batches = 1;
+  int num_classes = 1;
+  int spatial_dimension = 1;
+  bool output_index_only = (inputDesc[0].dims.nbDims != 3);
+  if (inputDesc[0].dims.nbDims == 3) {
+    num_batches = inputDesc[0].dims.d[0];
+    spatial_dimension = inputDesc[0].dims.d[1];
+    num_classes = inputDesc[1].dims.d[1];
+  } else {
+    spatial_dimension = inputDesc[0].dims.d[0];
+  }
   int output_length = outputDesc[0].dims.d[0];
 
   const float *boxes = (const float *)inputs[0];
@@ -140,7 +169,7 @@ int NonMaxSuppressionDynamic::enqueue(
   TRTNMSCUDAKernelLauncher_float(
       boxes, scores, mMaxOutputBoxesPerClass, mIouThreshold, mScoreThreshold,
       mOffset, output, mCenterPointBox, num_batches, spatial_dimension,
-      num_classes, output_length, workSpace, stream);
+      num_classes, output_length, output_index_only, workSpace, stream);
 
   return 0;
 }

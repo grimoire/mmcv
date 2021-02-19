@@ -62,7 +62,8 @@ def preprocess_onnx(onnx_model):
                     center_point_box = attribute.i
                 elif attribute.name == 'offset':
                     offset = attribute.i
-
+                elif attribute.name == 'iou_threshold':
+                    iou_threshold = attribute.f
             if len(node_inputs) >= 3:
                 max_output_boxes_per_class = parse_data(
                     node_inputs[2], np.int64)

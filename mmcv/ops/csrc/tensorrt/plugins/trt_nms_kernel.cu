@@ -57,12 +57,10 @@ __global__ void nms_reindex_kernel(int n, int* output, int* index_cache) {
   }
 }
 
-__global__ void mask_to_output_kernel(const unsigned long long* dev_mask,
-                                      const int* index, int* output,
-                                      int* output_count, int batch_id,
-                                      int cls_id, int spatial_dimension,
-                                      int col_blocks,
-                                      int max_output_boxes_per_class) {
+__global__ void mask_to_output_kernel(
+    const unsigned long long* dev_mask, const int* index, int* output,
+    int* output_count, int batch_id, int cls_id, int spatial_dimension,
+    int col_blocks, int max_output_boxes_per_class, bool output_index_only) {
   extern __shared__ unsigned long long remv[];
 
   // fill remv with 0
@@ -76,9 +74,13 @@ __global__ void mask_to_output_kernel(const unsigned long long* dev_mask,
     const int inblock = i % threadsPerBlock;
     if (!(remv[nblock] & (1ULL << inblock))) {
       if (threadIdx.x == 0) {
-        output[start * 3 + 0] = batch_id;
-        output[start * 3 + 1] = cls_id;
-        output[start * 3 + 2] = index[i];
+        if (!output_index_only) {
+          output[start * 3 + 0] = batch_id;
+          output[start * 3 + 1] = cls_id;
+          output[start * 3 + 2] = index[i];
+        } else {
+          output[start] = index[i];
+        }
         start += 1;
       }
       out_per_class_count += 1;
@@ -150,18 +152,17 @@ size_t get_onnxnms_workspace_size(size_t num_batches, size_t spatial_dimension,
  * @param[in] spatial_dimension boxes numbers each batch
  * @param[in] num_classes class numbers
  * @param[in] output_length the max output rows
+ * @param[in] output_index_only batch_id and class_id will not be output
  * @param[in] workspace memory for all temporary variables.
  * @param[in] stream cuda stream
  */
-void TRTNMSCUDAKernelLauncher_float(const float* boxes, const float* scores,
-                                    const int max_output_boxes_per_class,
-                                    const float iou_threshold,
-                                    const float score_threshold,
-                                    const int offset, int* output,
-                                    int center_point_box, int num_batches,
-                                    int spatial_dimension, int num_classes,
-                                    size_t output_length, void* workspace,
-                                    cudaStream_t stream) {
+void TRTNMSCUDAKernelLauncher_float(
+    const float* boxes, const float* scores,
+    const int max_output_boxes_per_class, const float iou_threshold,
+    const float score_threshold, const int offset, int* output,
+    int center_point_box, int num_batches, int spatial_dimension,
+    int num_classes, size_t output_length, bool output_index_only,
+    void* workspace, cudaStream_t stream) {
   const int col_blocks = DIVUP(spatial_dimension, threadsPerBlock);
   float* boxes_sorted = (float*)workspace;
   workspace = static_cast<char*>(workspace) +
@@ -265,7 +266,8 @@ void TRTNMSCUDAKernelLauncher_float(const float* boxes, const float* scores,
                               col_blocks * sizeof(unsigned long long),
                               stream>>>(
           dev_mask, index_cache, output, output_count, batch_id, cls_id,
-          spatial_dimension, col_blocks, max_output_boxes_per_class_cpu);
+          spatial_dimension, col_blocks, max_output_boxes_per_class_cpu,
+          output_index_only);
     }  // cls_id
   }    // batch_id
 }
